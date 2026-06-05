@@ -10,7 +10,7 @@ public:
         this->get_parameter("search_pattern", pattern);
         
         RCLCPP_INFO(this->get_logger(), "Active Search Pattern: %s", pattern.c_str());
-        RCLCPP_INFO(this->get_logger(), "Press Ctrl+C to exit and return to menu.");
+        RCLCPP_INFO(this->get_logger(), "Press Ctrl+C to exit and return to menu");
     }
 };
 
