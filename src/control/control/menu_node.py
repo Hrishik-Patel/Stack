@@ -1,14 +1,56 @@
 #!/usr/bin/env python3
 import sys
+import os
 import subprocess
 import rclpy
 from rclpy.node import Node
+from ament_index_python.packages import get_package_share_directory
 
 class ControlMenuNode(Node):
     def __init__(self):
         super().__init__('control_menu_node')
         self.get_logger().info("Control Menu Node Initialized.")
+        
+        # 1. Start the ZED launch file in the background and wait for it
+        self.launch_zed_and_wait()
+        
+        # 2. Drop cleanly into the blocking interactive menu loop
         self.run_menu()
+
+    def launch_zed_and_wait(self):
+        print("\n[System] Initializing ZED 2i Camera Driver...")
+        try:
+            # Safely start the ZED driver as a background subprocess
+            self.zed_process = subprocess.Popen(
+                ['ros2', 'launch', 'zed_wrapper', 'zed.launch.py'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True
+            )
+            
+            print("[System] Waiting for ZED 2i lifecycle initialization confirmation...")
+            
+            # Read the camera log line-by-line until the success target phrase matches
+            while True:
+                if self.zed_process.poll() is not None:
+                    raise Exception("ZED launch process terminated unexpectedly.")
+                    
+                line = self.zed_process.stdout.readline()
+                if not line:
+                    continue
+                
+                # Check for the distinct topic setup completion line from your logs
+                if "=== TOPIC selection parameters ===" in line:
+                    break
+            
+            # Print your requested success confirmation message
+            print("\n" + "="*40)
+            print("       Zed2i Launched Successfully!       ")
+            print("=========================================")
+            
+        except Exception as e:
+            self.get_logger().error(f"Critical error launching ZED camera: {e}")
+            sys.exit(1)
 
     def run_menu(self):
         while True:
@@ -27,7 +69,8 @@ class ControlMenuNode(Node):
             elif choice == '2':
                 self.launch_node('att', 'att_node')
             elif choice == '3':
-                print("Exiting Control Menu...")
+                print("Shutting down ZED Camera and exiting Control Menu...")
+                self.zed_process.terminate()
                 sys.exit(0)
             else:
                 print("[Invalid Choice] Please enter a number between 1 and 3.")
@@ -44,11 +87,12 @@ class ControlMenuNode(Node):
 
             if choice == '1':
                 print("\n[Launching] ArUco with Right Skew Search Pattern...")
-                self.launch_node('aruco', 'aruco_node', extra_args=['--ros-args', '-p', 'search_pattern:=right_skew'])
+                self.launch_node('aruco', 'camera_publisher')
+                self.launch_node('arucop', 'aruco_node', extra_args=['--ros-args', '-p', 'search_skew:=1'])
                 break
             elif choice == '2':
                 print("\n[Launching] ArUco with Left Skew Search Pattern...")
-                self.launch_node('aruco', 'aruco_node', extra_args=['--ros-args', '-p', 'search_pattern:=left_skew'])
+                self.launch_node('arucop', 'aruco_follower', extra_args=['--ros-args', '-p', 'search_skew:=-1'])
                 break
             elif choice == '3':
                 break
@@ -69,10 +113,12 @@ class ControlMenuNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
+    node = None
     try:
         node = ControlMenuNode()
-    except SystemExit:
-        pass
+    except (SystemExit, KeyboardInterrupt):
+        if node and hasattr(node, 'zed_process'):
+            node.zed_process.terminate()
     finally:
         rclpy.shutdown()
 
