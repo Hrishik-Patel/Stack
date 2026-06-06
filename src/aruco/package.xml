@@ -3,11 +3,19 @@
 <package format="3">
   <name>aruco</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>ArUco marker detection with search pattern</description>
   <maintainer email="hrishikpatel2307@gmail.com">hrishik</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>image_transport</depend>
+  <depend>cv_bridge</depend>
+  <depend>libopencv-dev</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
