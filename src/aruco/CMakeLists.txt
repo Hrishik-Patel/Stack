@@ -7,30 +7,28 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(image_transport REQUIRED)
-find_package(cv_bridge REQUIRED)
-find_package(OpenCV REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
-add_executable(aruco_node src/aruco_node.cpp)
-ament_target_dependencies(aruco_node rclcpp)
-
-add_executable(aruco_detector_node src/aruco_detector_node.cpp)
-ament_target_dependencies(aruco_detector_node
+add_executable(search_test_node src/search_test_node.cpp)
+ament_target_dependencies(search_test_node
   rclcpp
-  sensor_msgs
-  std_msgs
   geometry_msgs
-  image_transport
-  cv_bridge
-  OpenCV
+  std_msgs
+)
+
+add_executable(obstacle_avoidance src/obstacle_avoidance_node.cpp)
+ament_target_dependencies(obstacle_avoidance
+  rclcpp
+  geometry_msgs
+  std_msgs
+  sensor_msgs
 )
 
 install(TARGETS
-  aruco_node
-  aruco_detector_node
+  search_test_node
+  obstacle_avoidance
   DESTINATION lib/${PROJECT_NAME}
 )
 
