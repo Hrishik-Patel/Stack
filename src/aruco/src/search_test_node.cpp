@@ -1,9 +1,11 @@
 #include <string>
 #include <algorithm>
+#include <limits>
 
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "std_msgs/msg/int8.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 class SearchTestNode : public rclcpp::Node
 {
@@ -18,7 +20,10 @@ public:
     search_end_time_(this->now()),
     search_forward_time_(4.0),
     search_skew(kNoSkew),
-    aruco_detect_(false)
+    aruco_detect_(false),
+    obstacle_active_(false),
+    prev_pattern_(kMoveForward),
+    was_avoiding_(false)
   {
     this->declare_parameter<bool>("spot_turn_back", false);
     this->declare_parameter<double>("search_forward_time", 4.0);
@@ -46,6 +51,12 @@ public:
         aruco_detect_ = (msg->data == 1);
       });
 
+    obstacle_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      "/obstacle_active", 10,
+      [this](const std_msgs::msg::Bool::SharedPtr msg) {
+        obstacle_active_ = msg->data;
+      });
+
     search_timer_ = this->create_wall_timer(
       std::chrono::milliseconds(50),
       std::bind(&SearchTestNode::searchLoop, this));
@@ -58,17 +69,39 @@ private:
   enum SearchPattern { kMoveForward, kTurnA, kTurnB, kTurnC };
   enum SearchSkew    { kNoSkew = 0, kLeftSkew = -1, kRightSkew = 1 };
 
+  // ── Main loop ──────────────────────────────────────────────────────
   void searchLoop()
   {
+    // ArUco detected → hand off control, go silent
     if (aruco_detect_) {
-      publishVel(geometry_msgs::msg::Twist());
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-        "[ARUCO] Detected — rover stopped.");
+        "[ARUCO] Detected — handing control to aruco node.");
       return;
     }
+
+    // Obstacle active → OA node is publishing /cmd_vel, go silent
+    if (obstacle_active_) {
+      if (!was_avoiding_) {
+        was_avoiding_ = true;
+        prev_pattern_ = FollowPattern;
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+          "[SEARCH] Obstacle active — OA node has control.");
+      }
+      return;
+    }
+
+    // Resuming after obstacle cleared
+    if (was_avoiding_) {
+      was_avoiding_   = false;
+      FollowPattern   = prev_pattern_;
+      search_ref_set_ = false;   // re-init timing for current phase
+      RCLCPP_INFO(this->get_logger(), "[SEARCH] Obstacle cleared — resuming search pattern.");
+    }
+
     callSearchPattern();
   }
 
+  // ── Search pattern (unchanged) ─────────────────────────────────────
   void callSearchPattern()
   {
     geometry_msgs::msg::Twist cmd;
@@ -178,9 +211,11 @@ private:
     cmd_vel_pub_->publish(cmd);
   }
 
-  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr  cmd_vel_pub_;
-  rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr     aruco_sub_;
-  rclcpp::TimerBase::SharedPtr                             search_timer_;
+  // ── Members ────────────────────────────────────────────────────────
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr       cmd_vel_pub_;
+  rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr          aruco_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr          obstacle_sub_;
+  rclcpp::TimerBase::SharedPtr                                  search_timer_;
 
   SearchPattern  FollowPattern;
   bool           search_ref_set_;
@@ -191,6 +226,9 @@ private:
   double         search_forward_time_;
   SearchSkew     search_skew;
   bool           aruco_detect_;
+  bool           obstacle_active_;
+  bool           was_avoiding_;
+  SearchPattern  prev_pattern_;
 };
 
 int main(int argc, char ** argv)
