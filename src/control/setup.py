@@ -25,6 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'menu_launcher = control.menu_node:main',
+            'menu_namir = control.menu_node_namir:main',
+	        'menu_fix = control.menu_node_fix:main',
         ],
     },
 )

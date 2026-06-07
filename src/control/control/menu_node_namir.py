@@ -32,7 +32,7 @@ class ControlMenuNode(Node):
                 if "=== TOPIC selection parameters ===" in line:
                     break
             print("\n" + "="*40)
-            print("       Zed2i Launched Successfully!       ")
+            print("        Zed2i Launched Successfully!       ")
             print("="*40)
         except Exception as e:
             self.get_logger().error(f"Critical error launching ZED camera: {e}")
@@ -62,46 +62,60 @@ class ControlMenuNode(Node):
                 print("[Invalid] Please enter 1-3.")
 
     def handle_aruco_menu(self):
-        # 1. Ask for Target ID
         try:
             target_id = int(input("Enter Target ArUco ID to track: ").strip())
         except ValueError:
-            print("[Error] Invalid ID.")
+            print("[Error] Invalid ID. Aborting.")
             return
 
-        print(f"\n[System] Launching Follower for ID {target_id}...")
-        print("[Info] Press Ctrl+C at any time to stop the follower and return to the menu.")
+        while True:
+            print("\n--- ArUco Search + Follow Options ---")
+            print("1. Right Skew | 2. Left Skew | 3. No Skew | 4. Back")
+            choice = input("Select an option (1-4): ").strip()
+            
+            if choice in ('1', '2', '3'):
+                skew = {'1': 1, '2': -1, '3': 0}[choice]
+                self.handle_search_params(skew, target_id)
+                break
+            elif choice == '4':
+                break
+            else:
+                print("[Invalid] Please enter 1-4.")
 
-        # 2. Run in FOREGROUND instead of BACKGROUND
-        # This will block the menu loop until you press Ctrl+C
-        self.launch_node_foreground('arucop', 'aruco_follower', 
+    def handle_search_params(self, skew, target_id):
+        print(f"\n--- Search Parameters for ID {target_id} ---")
+        
+        try:
+            fwd_time = float(input("Enter forward search time (seconds): ").strip())
+            spot_turn_input = input("Enable spot turn back? (true/false): ").strip().lower()
+            # Properly maps 'y', 'yes', or 'true' cleanly to ROS 2 parameter requirements
+            spot_turn = 'true' if spot_turn_input in ['true', 'y', 'yes'] else 'false'
+        except ValueError:
+            print("[Error] Invalid parameter inputs. Using defaults (fwd_time=2.0, spot_turn=false).")
+            fwd_time = 2.0
+            spot_turn = 'false'
+
+        # 1. NEW: Launch Obstacle Avoidance Node in the background
+        print("[Launching] obstacle_avoidance_node (aruco)")
+        self.launch_node_background('aruco', 'obstacle_avoidance_node')
+
+        # 2. Launch background follower node
+        print(f"[Launching] aruco_follower (arucop) for ID {target_id}")
+        self.launch_node_background('arucop', 'aruco_follower', 
             extra_args=['--ros-args', '-p', f'target_id:={target_id}'])
-        
-        print("\n[System] Follower stopped. Returning to menu.")
 
-    # def handle_search_params(self, skew, target_id):
-    #     print(f"\n--- Starting Follower for ID {target_id} ---")
+        # 3. Launch foreground search script
+        print(f"[Launching] search_test | skew={skew} target={target_id}")
+        self.launch_node_foreground('aruco', 'search_test',
+            extra_args=[
+                '--ros-args',
+                '-p', f'target_id:={target_id}',
+                '-p', f'search_skew:={skew}',
+                '-p', f'search_forward_time:={fwd_time}',
+                '-p', f'spot_turn_back:={spot_turn}'
+            ])
 
-    #     # Pass target_id as a parameter to the background follower
-    #     print(f"[Launching] aruco_follower (arucop) for ID {target_id}")
-    #     self.launch_node_background('arucop', 'aruco_follower', 
-    #         extra_args=['--ros-args', '-p', f'target_id:={target_id}'])
-
-    #     # The search_test node is now completely commented out
-    #     # print(f"[Launching] search_test | skew={skew} target={target_id}")
-    #     # self.launch_node_foreground('aruco', 'search_test',
-    #     #     extra_args=[
-    #     #         '--ros-args',
-    #     #         '-p', f'target_id:={target_id}',
-    #     #         '-p', f'search_skew:={skew}'
-    #     #     ])
-
-    #     print("[Info] Follower is running in the background. Press Ctrl+C in this menu to stop it.")
-        
-    #     # If you don't call self.cleanup_active() here, 
-    #     # the follower will keep running until you exit the menu.
-    #     # If you want it to stop immediately after launching, uncomment the line below:
-        # self.cleanup_active()
+        self.cleanup_active()
 
     def launch_node_background(self, package, executable, extra_args=None):
         command = ['ros2', 'run', package, executable]
@@ -148,7 +162,9 @@ def main(args=None):
         if node:
             node.cleanup()
     finally:
-        rclpy.shutdown()
+        # Check context state to eliminate double-shutdown errors on lifecycle drops
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
