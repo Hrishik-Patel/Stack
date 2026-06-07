@@ -22,6 +22,7 @@ public:
     search_skew(kNoSkew),
     aruco_detect_(false),
     obstacle_active_(false),
+    obs_clear_count_(0),
     prev_pattern_(kMoveForward),
     was_avoiding_(false)
   {
@@ -54,7 +55,22 @@ public:
     obstacle_sub_ = this->create_subscription<std_msgs::msg::Bool>(
       "/obstacle_active", 10,
       [this](const std_msgs::msg::Bool::SharedPtr msg) {
-        obstacle_active_ = msg->data;
+        if (msg->data) {
+          // Obstacle signal is high — set immediately and reset clear counter
+          obstacle_active_ = true;
+          obs_clear_count_ = 0;
+        } else {
+          // Obstacle signal dropped — require OBS_CLEAR_NEEDED consecutive
+          // false ticks before considering it actually clear.
+          // This prevents a single missed tick from re-triggering search.
+          constexpr int OBS_CLEAR_NEEDED = 6;  // 6 × 50 ms = 300 ms hysteresis
+          if (obstacle_active_) {
+            if (++obs_clear_count_ >= OBS_CLEAR_NEEDED) {
+              obstacle_active_ = false;
+              obs_clear_count_ = 0;
+            }
+          }
+        }
       });
 
     search_timer_ = this->create_wall_timer(
@@ -227,6 +243,7 @@ private:
   SearchSkew     search_skew;
   bool           aruco_detect_;
   bool           obstacle_active_;
+  int            obs_clear_count_;
   bool           was_avoiding_;
   SearchPattern  prev_pattern_;
 };
