@@ -5,7 +5,6 @@
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "std_msgs/msg/bool.hpp"
-#include "std_msgs/msg/int8.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 
@@ -15,92 +14,190 @@ public:
   ObstacleAvoidanceNode()
   : Node("obstacle_avoidance"),
     obstacle_active_(false),
-    aruco_active_(false),
-    obs_x_(0.0f), obs_y_(0.0f)
+    clear_count_(0),
+    obs_x_(0.0f), obs_y_(0.0f),
+    state_(State::IDLE),
+    dodge_y_(0.0f)
   {
+    this->declare_parameter<std::string>("cloud_topic", "/local_grid_obstacle");
+    std::string topic = this->get_parameter("cloud_topic").as_string();
+
     pcl_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "/local_grid_safe", 10,
+      topic, 10,
       std::bind(&ObstacleAvoidanceNode::pclCallback, this, std::placeholders::_1));
 
-    // Int8: 0 = no detection, >0 = detected marker ID
-    aruco_sub_ = this->create_subscription<std_msgs::msg::Int8>(
-      "/aruco_detected", 10,
-      [this](const std_msgs::msg::Int8::SharedPtr msg) {
-        aruco_active_ = (msg->data > 0);
-      });
-
-    cmd_vel_pub_      = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
-    obs_active_pub_   = this->create_publisher<std_msgs::msg::Bool>("/obstacle_active", 10);
+    cmd_vel_pub_    = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+    obs_active_pub_ = this->create_publisher<std_msgs::msg::Bool>("/obstacle_active", 10);
 
     timer_ = this->create_wall_timer(
       std::chrono::milliseconds(50),
       std::bind(&ObstacleAvoidanceNode::loop, this));
 
-    RCLCPP_INFO(this->get_logger(), "ObstacleAvoidanceNode ready.");
+    RCLCPP_INFO(this->get_logger(), "ObstacleAvoidanceNode ready. Listening on: %s", topic.c_str());
   }
 
 private:
+  enum class State { IDLE, BACKING_UP, TURNING, FORWARD };
 
   void pclCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {
-    constexpr float min_x  = 0.5f;
-    constexpr float max_x  = 3.0f;
-    constexpr float half_w = 0.40f;
+    constexpr float min_dist        = 0.8f;
+    constexpr float max_dist        = 3.0f;
+    constexpr float half_w          = 0.30f;
+    constexpr float max_cy          = -0.05f;
+    constexpr float min_cy          = -1.0f;
+    constexpr int   CLEAR_THRESHOLD = 15;
 
-    bool found = false;
-    float best_x = std::numeric_limits<float>::max();
-    float x = 0.0f, y = 0.0f;
+    bool  found  = false;
+    float best_d = std::numeric_limits<float>::max();
+    float bx = 0.0f, by = 0.0f;
 
     sensor_msgs::PointCloud2ConstIterator<float> it_x(*msg, "x");
     sensor_msgs::PointCloud2ConstIterator<float> it_y(*msg, "y");
+    sensor_msgs::PointCloud2ConstIterator<float> it_z(*msg, "z");
 
-    for (; it_x != it_x.end(); ++it_x, ++it_y) {
-      const float px = *it_x, py = *it_y;
-      if (px < min_x || px > max_x)  continue;
-      if (std::abs(py) > half_w)      continue;
-      if (px < best_x) { best_x = px; x = px; y = py; found = true; }
+    for (; it_x != it_x.end(); ++it_x, ++it_y, ++it_z) {
+      const float cx = *it_x;   // lateral  (camera frame: +right)
+      const float cy = *it_y;   // vertical (camera frame: +down)
+      const float cz = *it_z;   // depth    (camera frame: +forward)
+
+      if (!std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(cz)) continue;
+      if (cz < min_dist || cz > max_dist)  continue;
+      if (std::abs(cx) > half_w)           continue;
+      if (cy > max_cy || cy < min_cy)      continue;
+
+      if (cz < best_d) {
+        best_d = cz;
+        bx = cz;   // obs_x_ = depth to obstacle
+        by = cx;   // obs_y_ = lateral position of obstacle (+right / -left)
+        found = true;
+      }
     }
 
-    obstacle_active_ = found;
-    obs_x_ = x;
-    obs_y_ = y;
+    if (found) {
+      obstacle_active_ = true;
+      clear_count_     = 0;
+      obs_x_ = bx;
+      obs_y_ = by;
+    } else {
+      if (obstacle_active_) {
+        if (++clear_count_ >= CLEAR_THRESHOLD) {
+          obstacle_active_ = false;
+          clear_count_     = 0;
+        }
+      }
+    }
   }
 
   void loop()
   {
-    // Always publish obstacle state so search + follower can go silent
     std_msgs::msg::Bool obs_msg;
-    obs_msg.data = obstacle_active_;
+    obs_msg.data = obstacle_active_ || (state_ != State::IDLE);
     obs_active_pub_->publish(obs_msg);
 
-    if (!obstacle_active_)
-      return;
-
     geometry_msgs::msg::Twist cmd;
-    cmd.linear.x = 0.0;
 
-    // ArUco visible → spin LEFT (toward where marker likely is)
-    // No ArUco     → spin RIGHT (default)
-    cmd.angular.z = aruco_active_ ? +1.0 : -1.0;
+    switch (state_) {
 
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-      "[OA] Obstacle x=%.2f y=%.2f | ArUco=%s → spin %s",
-      obs_x_, obs_y_,
-      aruco_active_ ? "YES" : "NO",
-      aruco_active_ ? "LEFT" : "RIGHT");
+      // ── IDLE ──────────────────────────────────────────────────────────
+      case State::IDLE:
+        if (obstacle_active_) {
+          // Latch dodge direction ONCE — never updated again until next IDLE.
+          // dodge_y_ > 0 → obstacle is to rover's RIGHT → we must turn LEFT  (+angular.z)
+          // dodge_y_ < 0 → obstacle is to rover's LEFT  → we must turn RIGHT (-angular.z)
+          dodge_y_ = obs_y_;
 
-    cmd_vel_pub_->publish(cmd);
+          if (obs_x_ < 1.2f) {
+            // Too close — back up before turning
+            state_end_ = this->now() + rclcpp::Duration::from_seconds(0.8);
+            state_ = State::BACKING_UP;
+            RCLCPP_WARN(this->get_logger(),
+              "[OA] Obstacle CLOSE dist=%.2f lateral=%.2f → backing up first",
+              obs_x_, obs_y_);
+          } else {
+            state_end_ = this->now() + rclcpp::Duration::from_seconds(2.0);
+            state_ = State::TURNING;
+            RCLCPP_WARN(this->get_logger(),
+              "[OA] Obstacle dist=%.2f lateral=%.2f → turning", obs_x_, obs_y_);
+          }
+        }
+        return;
+
+      // ── BACKING_UP ────────────────────────────────────────────────────
+      case State::BACKING_UP:
+        cmd.linear.x  = -0.4;
+        cmd.angular.z =  0.0;
+        cmd_vel_pub_->publish(cmd);
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 400,
+          "[OA] BACKING UP lin=-0.4");
+        if (this->now() >= state_end_) {
+          state_end_ = this->now() + rclcpp::Duration::from_seconds(2.0);
+          state_ = State::TURNING;
+          RCLCPP_INFO(this->get_logger(), "[OA] Backup done → turning");
+        }
+        return;
+
+      // ── TURNING ───────────────────────────────────────────────────────
+      // dodge_y_ is FIXED from IDLE entry — NOT updated during turn.
+      // Sign convention (ROS REP-103, robot frame):
+      //   +angular.z = turn LEFT,  -angular.z = turn RIGHT
+      //   +dodge_y_  = obstacle RIGHT of rover → turn LEFT  (+1.0)
+      //   -dodge_y_  = obstacle LEFT  of rover → turn RIGHT (-1.0)
+      case State::TURNING:
+        cmd.linear.x  = 0.0;
+        cmd.angular.z = (dodge_y_ > 0.05f) ? +1.0 :
+                        (dodge_y_ < -0.05f) ? -1.0 : +1.0;  // default: turn left
+        cmd_vel_pub_->publish(cmd);
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+          "[OA] TURNING angular=%.1f (dodge_y=%.2f)", cmd.angular.z, dodge_y_);
+        if (this->now() >= state_end_) {
+          // Extended to 2.0s to ensure enough lateral clearance before driving forward
+          state_end_ = this->now() + rclcpp::Duration::from_seconds(2.0);
+          state_ = State::FORWARD;
+          RCLCPP_INFO(this->get_logger(), "[OA] Turn done → moving forward");
+        }
+        return;
+
+      // ── FORWARD ───────────────────────────────────────────────────────
+      // Arc gently away from the obstacle side while moving forward to
+      // prevent clipping the corner of the obstacle.
+      // Only interrupt for a brand-new very-close obstacle (< 0.9m).
+      case State::FORWARD:
+        if (obstacle_active_ && obs_x_ < 0.9f) {
+          RCLCPP_WARN(this->get_logger(),
+            "[OA] New obstacle during FORWARD (dist=%.2f) → backing up", obs_x_);
+          dodge_y_   = obs_y_;
+          state_end_ = this->now() + rclcpp::Duration::from_seconds(0.8);
+          state_     = State::BACKING_UP;
+          return;
+        }
+        // Gentle arc away from the obstacle side (+dodge_y_ → obstacle was RIGHT → arc LEFT)
+        cmd.linear.x  = 0.45;
+        cmd.angular.z = (dodge_y_ > 0.05f) ? +0.3 :
+                        (dodge_y_ < -0.05f) ? -0.3 : +0.3;
+        cmd_vel_pub_->publish(cmd);
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+          "[OA] FORWARD arc lin=0.45 ang=%.1f", cmd.angular.z);
+        if (this->now() >= state_end_) {
+          state_ = State::IDLE;
+          RCLCPP_INFO(this->get_logger(), "[OA] Dodge complete → returning to search");
+        }
+        return;
+    }
   }
 
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pcl_sub_;
-  rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr            aruco_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr         cmd_vel_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr               obs_active_pub_;
-  rclcpp::TimerBase::SharedPtr                                    timer_;
+  rclcpp::TimerBase::SharedPtr                                     timer_;
 
   bool  obstacle_active_;
-  bool  aruco_active_;
+  int   clear_count_;
   float obs_x_, obs_y_;
+
+  State          state_;
+  rclcpp::Time   state_end_;
+  float          dodge_y_;
 };
 
 int main(int argc, char ** argv)
