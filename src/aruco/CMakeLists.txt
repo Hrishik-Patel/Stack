@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(aruco)
+project(obstacle_search)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -13,30 +13,22 @@ find_package(sensor_msgs REQUIRED)
 
 add_executable(search_test_node src/search_test_node.cpp)
 ament_target_dependencies(search_test_node
-  rclcpp
-  geometry_msgs
-  std_msgs
-)
+  rclcpp geometry_msgs std_msgs)
 
-add_executable(obstacle_avoidance src/obstacle_avoidance_node.cpp)
-ament_target_dependencies(obstacle_avoidance
-  rclcpp
-  geometry_msgs
-  std_msgs
-  sensor_msgs
-)
+add_executable(obstacle_avoidance_node src/obstacle_avoidance_node.cpp)
+ament_target_dependencies(obstacle_avoidance_node
+  rclcpp geometry_msgs std_msgs sensor_msgs)
 
 install(TARGETS
   search_test_node
-  obstacle_avoidance
+  obstacle_avoidance_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
-if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  set(ament_cmake_copyright_FOUND TRUE)
-  set(ament_cmake_cpplint_FOUND TRUE)
-  ament_lint_auto_find_test_dependencies()
-endif()
+install(DIRECTORY
+  urdf
+  launch
+  DESTINATION share/${PROJECT_NAME}
+)
 
 ament_package()
